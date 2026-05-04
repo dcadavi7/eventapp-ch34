@@ -34,43 +34,13 @@ El sistema notifica por correo electrónico en cada acción relevante: confirmac
 
 ## 2. Arquitectura
 
-```
-Usuarios
-  │
-  ▼
-CloudFront ──► S3 (frontend estático Next.js)
-  │
-  ▼
-API Gateway (REST)
-  │
-  ├──► Lambda: LookUpEvent        GET  /events, GET /events/{id}
-  ├──► Lambda: CRUDEvent          POST /events, PUT /events/{id}, DELETE /events/{id}
-  └──► Lambda: AssistantRegister  POST /registrations
-             │
-             ▼
-         DynamoDB (Single-Table Design)
-         EventsTable-{env}
-             │
-             ▼
-         SQS Standard ──► Lambda: SendNotification ──► Amazon SES
-         (notificaciones)
-
-EventBridge (reglas cron por evento)
-  ├──► Lambda: StatusHandler   (transición PROGRAMADO → EN_CURSO al inicio)
-  ├──► Lambda: ReminderEvent   (recordatorio 24 h antes)
-  └──► Lambda: ReminderEvent   (recordatorio 12 h antes)
-
-SQS FIFO ──► Lambda: GenerateReport
-(reportes)        └──► S3 (reportes generados)
-```
+![Diagrama de arquitectura](docs/architecture/Reto2Nube.png)
 
 **Autenticación:** Amazon Cognito con dos grupos (`Organizers`, `Attendees`).
 
 **Infraestructura como código:** dos stacks de AWS CloudFormation:
 - `data-stack.yml` — capa de datos (DynamoDB, SQS, S3 buckets)
 - `app-stack.yml`  — capa de aplicación (Lambdas, API Gateway, Cognito, CloudFront)
-
-![Diagrama de arquitectura](docs/architecture/Reto2Nube.png)
 
 ---
 
