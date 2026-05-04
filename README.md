@@ -70,6 +70,8 @@ SQS FIFO ──► Lambda: GenerateReport
 - `data-stack.yml` — capa de datos (DynamoDB, SQS, S3 buckets)
 - `app-stack.yml`  — capa de aplicación (Lambdas, API Gateway, Cognito, CloudFront)
 
+![Diagrama de arquitectura](docs/architecture/Reto2Nube.png)
+
 ---
 
 ## 3. Estructura del repositorio
