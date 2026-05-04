@@ -27,21 +27,24 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
   useEffect(() => {
     const token = typeof window !== 'undefined' ? localStorage.getItem('cognito_access_token') : null;
     const role = typeof window !== 'undefined' ? localStorage.getItem('cognito_role') as UserRole : null;
+    const email = typeof window !== 'undefined' ? localStorage.getItem('cognito_email') || '' : '';
     if (token && role) {
-      setUser({ name: 'Usuario Demo', email: 'demo@example.com', role });
+      setUser({ name: email.split('@')[0] || 'Usuario', email, role });
     }
   }, []);
 
   const login = (email: string, role: UserRole) => {
-    setUser({ name: 'Usuario Activo', email, role });
+    setUser({ name: email.split('@')[0], email, role });
     localStorage.setItem('cognito_access_token', 'mock_jwt_token_12345');
     localStorage.setItem('cognito_role', role || 'asistente');
+    localStorage.setItem('cognito_email', email);
   };
 
   const logout = () => {
     setUser(null);
     localStorage.removeItem('cognito_access_token');
     localStorage.removeItem('cognito_role');
+    localStorage.removeItem('cognito_email');
   };
 
   return (

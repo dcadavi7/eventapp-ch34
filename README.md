@@ -314,35 +314,41 @@ Copiar la **Frontend URL** del Summary del pipeline de frontend y abrirla en el 
 
 ### 8.2 Iniciar sesión — autenticación simulada
 
-> **Nota:** La integración con Cognito está pendiente de implementación. El login actual es **simulado**: acepta cualquier email y contraseña, y asigna el rol automáticamente según el email ingresado. No es necesario crear usuarios en Cognito para probar la aplicación.
+> **Nota:** La integración con Cognito está pendiente de implementación. El login actual es **simulado**: acepta cualquier email y contraseña. No es necesario crear usuarios en Cognito ni registrarse previamente.
 
-El rol se determina así:
+El formulario incluye un **selector de rol** — elige directamente si entras como Organizador o Asistente, sin importar el email que uses.
 
-| Email ingresado | Rol asignado | Vista que abre |
-|---|---|---|
-| Contiene `org` (ej. `organizador@test.com`) | Organizador | Panel de gestión de eventos |
-| Cualquier otro email | Asistente | Catálogo de eventos activos |
+> **Importante para recibir notificaciones:** SES en modo sandbox solo envía correos a direcciones verificadas en AWS. El email que ingreses en el login es el que el sistema usa como destinatario de notificaciones. Debes usar tu **email real verificado en SES** (ver sección 5.3).
 
-**Ejemplos de acceso:**
+**Escenario A — Un solo email para ambos roles** (recomendado para pruebas rápidas)
 
-Para entrar como **Organizador**:
-- Email: `organizador@test.com`
-- Contraseña: `cualquier valor` (ej. `123456`)
+Verifica un único email en SES y úsalo en ambas sesiones cambiando solo el selector de rol:
 
-Para entrar como **Asistente**:
-- Email: `asistente@test.com`
-- Contraseña: `cualquier valor` (ej. `123456`)
+| Sesión | Email | Contraseña | Rol seleccionado |
+|---|---|---|---|
+| Primera | `tucorreo@gmail.com` | `cualquier valor` | Organizador |
+| Segunda | `tucorreo@gmail.com` | `cualquier valor` | Asistente |
+
+**Escenario B — Dos emails distintos**
+
+Verifica ambos emails en SES y úsalos así:
+
+| Sesión | Email | Contraseña | Rol seleccionado |
+|---|---|---|---|
+| Primera | `tucorreo1@gmail.com` | `cualquier valor` | Organizador |
+| Segunda | `tucorreo2@gmail.com` | `cualquier valor` | Asistente |
 
 No es necesario registrarse previamente. El botón de registro también es simulado en esta versión.
 
 ### 8.3 Probar el flujo completo
 
-1. Abrir la Frontend URL
-2. Iniciar sesión con `organizador@test.com` / `123456`
-3. Crear un evento con fecha futura
-4. Cerrar sesión e iniciar con `asistente@test.com` / `123456`
-5. Registrarse al evento
-6. Verificar que llegó el email de confirmación a la dirección verificada en SES
+1. Verificar en SES el email (o emails) que usarás — ver sección 5.3
+2. Abrir la Frontend URL
+3. Iniciar sesión con tu email verificado y seleccionar rol **Organizador**
+4. Crear un evento con fecha futura
+5. Cerrar sesión e iniciar sesión con rol **Asistente** (puede ser el mismo email)
+6. Registrarse al evento
+7. Verificar que llegó el email de confirmación de registro
 
 ### 8.4 Verificar los recursos en AWS Console
 
@@ -495,7 +501,7 @@ env:
 
 Los stacks de CloudFormation se crean con el sufijo del ambiente (`lab`, `dev`, `prod`). Esto permite tener múltiples ambientes en la misma cuenta AWS con recursos completamente independientes.
 
-Por defecto todos los pipelines usan `lab`. Para desplegar en `prod`, ejecutar cada pipeline manualmente y seleccionar `prod` en el campo de ambiente.
+Por defecto todos los pipelines usan `lab`.
 
 ### Parámetros del App Stack
 
