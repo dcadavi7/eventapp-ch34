@@ -130,7 +130,22 @@ Antes de empezar, asegúrate de tener:
 
 ### 5.1 Elegir la región
 
-Todos los recursos se desplegaran en una sola región. Esta guía usa **`us-east-2`** (Ohio). Si prefieres otra, deberás cambiar el valor de `AWS_REGION` en los 4 archivos de workflow antes de hacer el primer push (ver sección 11).
+Todos los recursos se desplegaran en una sola región. Esta guía usa **`us-east-2`** (Ohio). Si prefieres otra, deberás cambiar el valor de `AWS_REGION` en los 4 archivos de workflow antes de hacer el primer push:
+
+| Archivo | Línea |
+|---|---|
+| `.github/workflows/deploy-data-stack.yml` | 19 |
+| `.github/workflows/deploy-app-stack.yml` | 19 |
+| `.github/workflows/deploy-lambdas.yml` | 19 |
+| `.github/workflows/deploy-frontend.yml` | 23 |
+
+En cada archivo, la línea tiene esta forma:
+
+```yaml
+AWS_REGION: us-east-2
+```
+
+Reemplaza `us-east-2` por el código de la región que desees (ej. `us-east-1`, `eu-west-1`).
 
 ### 5.2 Crear el usuario IAM para el pipeline
 
@@ -139,12 +154,9 @@ El pipeline de GitHub Actions necesita credenciales de AWS con permisos para cre
 1. Ir a **AWS Console → IAM → Users → Create user**
 2. Nombre: `github-actions-eventapp`
 3. En **Set permissions** → **Attach policies directly** → buscar y seleccionar `AdministratorAccess`
-
-   > Para entornos de producción se recomienda una política de mínimo privilegio. Ver sección 11 para el alcance exacto de permisos.
-
 4. Clic en **Create user**
 5. Abrir el usuario recién creado → pestaña **Security credentials**
-6. Clic en **Create access key** → seleccionar **Application running outside AWS**
+6. Clic en **Create access key** → seleccionar **Application running outside AWS**. Deje los parámetros por defecto y seleccione **Create access key**
 7. **Guardar ambos valores** — solo se muestran una vez:
    - `Access key ID`
    - `Secret access key`
@@ -160,14 +172,7 @@ Amazon SES requiere que el email desde el cual se envían notificaciones esté v
 5. Revisar la bandeja de entrada de ese email y hacer clic en el enlace de confirmación
 6. Volver a la consola y verificar que el estado sea **Verified**
 
-**Nota sobre el modo sandbox de SES:** Las cuentas AWS nuevas inician en modo sandbox, lo que significa que solo puedes enviar correos hacia emails también verificados. Para poder enviar a cualquier destinatario:
-
-1. Ir a **SES → Account dashboard**
-2. Clic en **Request production access**
-3. Completar el formulario describiendo el caso de uso
-4. Esperar la aprobación de AWS (generalmente 24 h)
-
-Mientras esperas la aprobación, puedes probar el sistema verificando individualmente cada email destinatario en **SES → Identities → Create identity**.
+**Nota sobre el modo sandbox de SES:** Las cuentas AWS nuevas inician en modo sandbox, lo que significa que solo puedes enviar correos hacia emails también verificados. Para efectos de la implementación actual este sandbox es suficiente y para el registro de eventos se enviarán los correos desde y hacia la dirección registrada en el paso anterior.
 
 ---
 
@@ -255,7 +260,7 @@ Al terminar, en la pestaña **Summary** verás los nombres de los buckets S3 cre
 
 Clic en **Run workflow**. Esperar que termine (≈ 1-2 min).
 
-Este pipeline empaqueta cada función `.py` en su `.zip` y lo sube al bucket del paso anterior. Verás mensajes `SKIP` en la sección de "actualizar código" — es normal, significa que las funciones Lambda aún no existen en AWS. Se crearán en el siguiente paso.
+Este pipeline empaqueta cada función `.py` en su `.zip` y lo sube al bucket del paso anterior.
 
 ---
 
@@ -307,30 +312,37 @@ Al terminar, el **Summary** muestra la URL pública de la aplicación.
 
 Copiar la **Frontend URL** del Summary del pipeline de frontend y abrirla en el navegador. Deberías ver la pantalla de login de EventApp.
 
-### 8.2 Crear un usuario de prueba en Cognito
+### 8.2 Iniciar sesión — autenticación simulada
 
-La aplicación usa Amazon Cognito para autenticación. Para crear un usuario de prueba:
+> **Nota:** La integración con Cognito está pendiente de implementación. El login actual es **simulado**: acepta cualquier email y contraseña, y asigna el rol automáticamente según el email ingresado. No es necesario crear usuarios en Cognito para probar la aplicación.
 
-1. Ir a **AWS Console → Cognito → User Pools → EventUserPool-lab**
-2. Pestaña **Users → Create user**
-3. Completar los campos:
-   - **User name:** `organizador@ejemplo.com`
-   - **Email:** `organizador@ejemplo.com`
-   - **Temporary password:** `Temporal1234!`
-   - Marcar **Mark email as verified**
-4. Clic en **Create user**
-5. Ir a la pestaña **Groups** → **Add user to group** → seleccionar `Organizers`
+El rol se determina así:
 
-Repetir para crear un usuario asistente y asignarlo al grupo `Attendees`.
+| Email ingresado | Rol asignado | Vista que abre |
+|---|---|---|
+| Contiene `org` (ej. `organizador@test.com`) | Organizador | Panel de gestión de eventos |
+| Cualquier otro email | Asistente | Catálogo de eventos activos |
+
+**Ejemplos de acceso:**
+
+Para entrar como **Organizador**:
+- Email: `organizador@test.com`
+- Contraseña: `cualquier valor` (ej. `123456`)
+
+Para entrar como **Asistente**:
+- Email: `asistente@test.com`
+- Contraseña: `cualquier valor` (ej. `123456`)
+
+No es necesario registrarse previamente. El botón de registro también es simulado en esta versión.
 
 ### 8.3 Probar el flujo completo
 
 1. Abrir la Frontend URL
-2. Iniciar sesión con el usuario organizador
+2. Iniciar sesión con `organizador@test.com` / `123456`
 3. Crear un evento con fecha futura
-4. Cerrar sesión e iniciar con el usuario asistente
+4. Cerrar sesión e iniciar con `asistente@test.com` / `123456`
 5. Registrarse al evento
-6. Verificar que llegó el email de confirmación
+6. Verificar que llegó el email de confirmación a la dirección verificada en SES
 
 ### 8.4 Verificar los recursos en AWS Console
 
