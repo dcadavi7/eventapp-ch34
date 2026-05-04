@@ -1,0 +1,179 @@
+name: Lambdas — Empaquetar y subir
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'backend/functions/**'
+      - '.github/workflows/deploy-lambdas.yml'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Ambiente de despliegue'
+        required: true
+        default: 'lab'
+        type: choice
+        options: [lab, dev, prod]
+
+env:
+  AWS_REGION: us-east-2
+  ENVIRONMENT: ${{ github.event.inputs.environment || 'lab' }}
+
+jobs:
+  package-and-deploy:
+    name: Detectar cambios → Build → S3 → Lambda
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout (con historial para detectar cambios)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Configurar credenciales AWS
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Obtener bucket de Lambdas desde el Data Stack
+        id: bucket
+        run: |
+          LAMBDA_BUCKET=$(aws cloudformation describe-stacks \
+            --stack-name EventApp-${{ env.ENVIRONMENT }}-DataStack \
+            --query 'Stacks[0].Outputs[?OutputKey==`LambdaCodeBucketEvents`].OutputValue' \
+            --output text)
+
+          if [ -z "$LAMBDA_BUCKET" ] || [ "$LAMBDA_BUCKET" = "None" ]; then
+            echo "ERROR: bucket de Lambdas no encontrado."
+            echo "Ejecuta primero el pipeline 'IaC — Data Stack'."
+            exit 1
+          fi
+
+          echo "name=${LAMBDA_BUCKET}" >> $GITHUB_OUTPUT
+          echo "Bucket: ${LAMBDA_BUCKET}"
+
+      # Detecta qué funciones cambiaron en este push comparando con el commit anterior.
+      # En workflow_dispatch o primer push (before=000...) despliega todas.
+      - name: Detectar funciones modificadas
+        id: changed
+        run: |
+          BEFORE="${{ github.event.before }}"
+          ALL="crud_event assistant_register lookup_events status_handler reminder_event send_notification request_report generate_report"
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] || \
+             [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
+            echo "Modo: desplegar todas las funciones"
+            echo "functions=${ALL}" >> $GITHUB_OUTPUT
+          else
+            CHANGED=$(git diff --name-only "${BEFORE}" "${{ github.sha }}" \
+              -- 'backend/functions/' \
+              | sed 's|backend/functions/\([^/]*\)/.*|\1|' \
+              | sort -u \
+              | tr '\n' ' ' \
+              | xargs)  # trim espacios
+
+            if [ -z "$CHANGED" ]; then
+              echo "Sin cambios en funciones Lambda. Pipeline sin trabajo."
+              echo "functions=" >> $GITHUB_OUTPUT
+            else
+              echo "Funciones a desplegar: ${CHANGED}"
+              echo "functions=${CHANGED}" >> $GITHUB_OUTPUT
+            fi
+          fi
+
+      - name: Build y despliegue por función
+        if: steps.changed.outputs.functions != ''
+        run: |
+          BUCKET="${{ steps.bucket.outputs.name }}"
+          ENV="${{ env.ENVIRONMENT }}"
+
+          # Mapa: nombre_carpeta → nombre_función_en_aws (definido en app-stack.yml)
+          declare -A AWS_NAMES=(
+            [crud_event]="CRUDEvent-${ENV}"
+            [assistant_register]="AssistantRegister-${ENV}"
+            [lookup_events]="LookUpEvent-${ENV}"
+            [status_handler]="StatusHandler-${ENV}"
+            [reminder_event]="ReminderEvent-${ENV}"
+            [send_notification]="SendNotification-${ENV}"
+            [request_report]="RequestReport-${ENV}"
+            [generate_report]="GenerateReport-${ENV}"
+          )
+
+          for fn in ${{ steps.changed.outputs.functions }}; do
+            FN_DIR="backend/functions/${fn}"
+            BUILD_DIR="/tmp/lambda-build/${fn}"
+            ZIP_PATH="/tmp/${fn}.zip"
+
+            echo ""
+            echo "────────────────────────────────"
+            echo "Procesando: ${fn}"
+            echo "────────────────────────────────"
+
+            # 1. Preparar directorio de build limpio
+            rm -rf "${BUILD_DIR}" && mkdir -p "${BUILD_DIR}"
+
+            # 2. Copiar handler al directorio de build
+            cp "${FN_DIR}/${fn}.py" "${BUILD_DIR}/"
+
+            # 3. Instalar dependencias externas si las hay
+            if [ -s "${FN_DIR}/requirements.txt" ] && \
+               grep -qv '^\s*#' "${FN_DIR}/requirements.txt"; then
+              echo "  Instalando dependencias..."
+              pip install -r "${FN_DIR}/requirements.txt" \
+                -t "${BUILD_DIR}/" \
+                --quiet \
+                --no-cache-dir
+            else
+              echo "  Sin dependencias externas"
+            fi
+
+            # 4. Empaquetar (excluye .pyc y __pycache__ para reducir tamaño)
+            cd "${BUILD_DIR}"
+            zip -r "${ZIP_PATH}" . \
+              -x "*.pyc" \
+              -x "*/__pycache__/*" \
+              -x "*.dist-info/*" \
+              > /dev/null
+            cd -
+            echo "  ZIP: $(du -sh ${ZIP_PATH} | cut -f1)"
+
+            # 5. Subir al bucket S3
+            aws s3 cp "${ZIP_PATH}" "s3://${BUCKET}/${fn}.zip"
+            echo "  Subido: s3://${BUCKET}/${fn}.zip"
+
+            # 6. Actualizar código en la función Lambda existente
+            #    Si la función no existe aún (primer despliegue), se ignora el error.
+            FN_NAME="${AWS_NAMES[$fn]}"
+            aws lambda update-function-code \
+              --function-name "${FN_NAME}" \
+              --s3-bucket "${BUCKET}" \
+              --s3-key "${fn}.zip" \
+              --output text \
+              --query 'FunctionName' \
+              2>/dev/null \
+              && echo "  Lambda actualizada: ${FN_NAME}" \
+              || echo "  SKIP: ${FN_NAME} no existe aún (se creará con el App Stack)"
+          done
+
+      - name: Resumen en GitHub
+        if: steps.changed.outputs.functions != ''
+        run: |
+          BUCKET="${{ steps.bucket.outputs.name }}"
+          FUNCTIONS="${{ steps.changed.outputs.functions }}"
+
+          echo "## Lambdas desplegadas"     >> $GITHUB_STEP_SUMMARY
+          echo ""                           >> $GITHUB_STEP_SUMMARY
+          echo "**Bucket:** \`${BUCKET}\`"  >> $GITHUB_STEP_SUMMARY
+          echo ""                           >> $GITHUB_STEP_SUMMARY
+          echo "| Función | Estado |"       >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|"                  >> $GITHUB_STEP_SUMMARY
+          for fn in $FUNCTIONS; do
+            echo "| \`${fn}\` | ✅ Actualizada |" >> $GITHUB_STEP_SUMMARY
+          done

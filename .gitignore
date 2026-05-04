@@ -1,0 +1,43 @@
+# ──────────────────────────────────────
+# Node / Next.js
+# ──────────────────────────────────────
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+
+# ──────────────────────────────────────
+# Python
+# ──────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Dependencias instaladas en carpetas de build (pip install -t .)
+backend/functions/*/boto3/
+backend/functions/*/botocore/
+backend/functions/*/*.dist-info/
+
+# ──────────────────────────────────────
+# Artefactos de build Lambda (generados por el pipeline, nunca versionados)
+# ──────────────────────────────────────
+/tmp/lambda-build/
+*.zip
+
+# ──────────────────────────────────────
+# Variables de entorno locales
+# ──────────────────────────────────────
+.env
+.env.local
+.env*.local
+frontend/.env.local
+
+# ──────────────────────────────────────
+# IDEs y sistema operativo
+# ──────────────────────────────────────
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp

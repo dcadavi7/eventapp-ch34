@@ -1,0 +1,2 @@
+# Dependencias externas de send_notification
+# boto3 ya está disponible en el runtime de Lambda — no incluir aquí

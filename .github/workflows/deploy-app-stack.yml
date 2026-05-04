@@ -1,0 +1,110 @@
+name: IaC — App Stack
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'infrastructure/app-stack.yml'
+      - '.github/workflows/deploy-app-stack.yml'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Ambiente de despliegue'
+        required: true
+        default: 'lab'
+        type: choice
+        options: [lab, dev, prod]
+
+env:
+  AWS_REGION: us-east-2
+  ENVIRONMENT: ${{ github.event.inputs.environment || 'lab' }}
+
+jobs:
+  deploy:
+    name: Desplegar App Stack (Cognito · Lambdas · API Gateway · CloudFront)
+    runs-on: ubuntu-latest
+    outputs:
+      api-url:         ${{ steps.stack-outputs.outputs.api-url }}
+      frontend-bucket: ${{ steps.stack-outputs.outputs.frontend-bucket }}
+      cloudfront-id:   ${{ steps.stack-outputs.outputs.cloudfront-id }}
+      frontend-url:    ${{ steps.stack-outputs.outputs.frontend-url }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configurar credenciales AWS
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Verificar que el Data Stack existe
+        run: |
+          STATUS=$(aws cloudformation describe-stacks \
+            --stack-name EventApp-${{ env.ENVIRONMENT }}-DataStack \
+            --query 'Stacks[0].StackStatus' \
+            --output text 2>/dev/null || echo "NOT_FOUND")
+
+          if [ "$STATUS" = "NOT_FOUND" ] || [ "$STATUS" = "ROLLBACK_COMPLETE" ]; then
+            echo "ERROR: Data Stack no encontrado o en estado inválido (${STATUS})."
+            echo "Ejecuta primero el pipeline 'IaC — Data Stack'."
+            exit 1
+          fi
+
+          echo "Data Stack en estado: ${STATUS}"
+
+      - name: Desplegar infrastructure/app-stack.yml
+        run: |
+          aws cloudformation deploy \
+            --template-file infrastructure/app-stack.yml \
+            --stack-name EventApp-${{ env.ENVIRONMENT }}-AppStack \
+            --parameter-overrides \
+              Environment=${{ env.ENVIRONMENT }} \
+              SesFromEmail=${{ secrets.SES_FROM_EMAIL }} \
+            --capabilities CAPABILITY_IAM \
+            --no-fail-on-empty-changeset
+
+      - name: Obtener outputs del App Stack
+        id: stack-outputs
+        run: |
+          STACK="EventApp-${{ env.ENVIRONMENT }}-AppStack"
+
+          API_URL=$(aws cloudformation describe-stacks --stack-name $STACK \
+            --query 'Stacks[0].Outputs[?OutputKey==`ApiGatewayEndpoint`].OutputValue' \
+            --output text)
+
+          BUCKET=$(aws cloudformation describe-stacks --stack-name $STACK \
+            --query 'Stacks[0].Outputs[?OutputKey==`FrontendBucketName`].OutputValue' \
+            --output text)
+
+          CF_ID=$(aws cloudformation describe-stacks --stack-name $STACK \
+            --query 'Stacks[0].Outputs[?OutputKey==`CloudFrontDistributionId`].OutputValue' \
+            --output text)
+
+          CF_URL=$(aws cloudformation describe-stacks --stack-name $STACK \
+            --query 'Stacks[0].Outputs[?OutputKey==`FrontendUrl`].OutputValue' \
+            --output text)
+
+          echo "api-url=${API_URL}"          >> $GITHUB_OUTPUT
+          echo "frontend-bucket=${BUCKET}"   >> $GITHUB_OUTPUT
+          echo "cloudfront-id=${CF_ID}"      >> $GITHUB_OUTPUT
+          echo "frontend-url=${CF_URL}"      >> $GITHUB_OUTPUT
+
+          echo "API URL        : ${API_URL}"
+          echo "Frontend Bucket: ${BUCKET}"
+          echo "CloudFront ID  : ${CF_ID}"
+          echo "Frontend URL   : ${CF_URL}"
+
+      - name: Resumen en GitHub
+        run: |
+          echo "## App Stack desplegado exitosamente"  >> $GITHUB_STEP_SUMMARY
+          echo ""                                      >> $GITHUB_STEP_SUMMARY
+          echo "| Recurso | Valor |"                   >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|"                              >> $GITHUB_STEP_SUMMARY
+          echo "| API Gateway URL | ${{ steps.stack-outputs.outputs.api-url }}      |" >> $GITHUB_STEP_SUMMARY
+          echo "| Frontend URL    | ${{ steps.stack-outputs.outputs.frontend-url }}  |" >> $GITHUB_STEP_SUMMARY
+          echo "| CloudFront ID   | ${{ steps.stack-outputs.outputs.cloudfront-id }} |" >> $GITHUB_STEP_SUMMARY
+          echo ""                                      >> $GITHUB_STEP_SUMMARY
+          echo "> **Siguiente paso:** ejecutar el pipeline \`Deploy Frontend\` para publicar la aplicación web." >> $GITHUB_STEP_SUMMARY

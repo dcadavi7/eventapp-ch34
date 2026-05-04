@@ -1,0 +1,2 @@
+# Dependencias externas de assistant_register
+# boto3 ya está disponible en el runtime de Lambda — no incluir aquí

@@ -1,0 +1,726 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  EventApp — Stack 02: Capa de Aplicacion
+  ===========================================
+  Provisiona la logica y presentacion para Gestion de Eventos:
+    - Lambdas (Sendnotification, crudEvents, lookupevents, statushandler,requestreport, generatereport, assistantregister) y API Gateway (Backend)
+    - Cognito (Organizadores y Asistentes)
+    - S3 Frontend y CloudFront (Acceso directo por URL de CF)
+
+Parameters:
+  Environment:
+    Type: String
+    Default: lab
+    AllowedValues: [lab, dev, prod]
+    Description: >
+      Debe coincidir con el Environment usado en 01-data-stack.yml.
+      CloudFormation usara este valor para construir los nombres de importacion.
+  
+  LambdaRuntime:
+    Type: String
+    Default: python3.12
+    AllowedValues:
+      - python3.12
+      - python3.11
+    Description: Runtime de Python para las funciones Lambda.
+
+  LambdaTimeout:
+    Type: Number
+    Default: 30
+    Description: >
+      Timeout en segundos para las Lambdas. El SqsVisibilityTimeout
+      del data-stack debe ser mayor a este valor.
+
+  LambdaMemory:
+    Type: Number
+    Default: 256
+    AllowedValues: [128, 256, 512, 1024]
+    Description: Memoria RAM asignada a cada Lambda (MB).
+    
+  SesFromEmail:
+    Type: String
+    Default: 'camilo.velasquezr@gmail.com' #colocar el email configurado 
+    Description: >
+      Email verificado en Amazon SES que se usara como remitente.
+      Debe estar verificado en SES → Identities antes de desplegar.
+      Dejar vacio si aun no se ha verificado; actualizar luego con stack update.
+
+
+
+Resources:
+  # =========================================================
+  # 1. COGNITO (Organizadores y Asistentes)
+  # =========================================================
+  EventUserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub 'EventUserPool-${Environment}'
+      AutoVerifiedAttributes: [email]
+
+  EventUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: EventWebClient
+      UserPoolId: !Ref EventUserPool
+      ExplicitAuthFlows:
+        - ALLOW_USER_PASSWORD_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+
+  OrganizersGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: Organizers
+      UserPoolId: !Ref EventUserPool
+      
+  AttendeesGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: Attendees
+      UserPoolId: !Ref EventUserPool
+
+  # =========================================================
+  # 2. BACKEND (Roles y Lambdas de Eventos)
+  # =========================================================
+  EventLambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: EventBackendAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource: 
+                  - Fn::ImportValue: !Sub 'EventApp-${Environment}-EventsTableArn'
+                  - !Sub
+                    - '${TableArn}/index/*'
+                    - TableArn:
+                        Fn::ImportValue: !Sub 'EventApp-${Environment}-EventsTableArn'
+              - Effect: Allow
+                Action: 
+                  - sqs:SendMessage
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
+                  - sqs:GetQueueUrl
+                Resource: '*' #dar permisos de mínimo privilegio al recurso específico
+              - Effect: Allow 
+                Action:
+                  - ses:SendEmail
+                  - ses:SendRawEmail
+                Resource: '*' #dar permisos de mínimo privilegio al recurso específico
+              - Effect: Allow
+                Action:
+                  - events:PutRule
+                  - events:DeleteRule
+                  - events:PutTargets
+                  - events:RemoveTargets
+                  - events:ListTargetsByRule
+                Resource: '*' #dar permisos de mínimo privilegio al recurso específico
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                Resource:
+                  - !Sub
+                    - '${BucketArn}/*'
+                    - BucketArn:
+                        !Join
+                          - ''
+                          - - 'arn:aws:s3:::'
+                            - Fn::ImportValue: !Sub 'EventApp-${Environment}-ReportsBucketEvents'
+
+  CRUDEventFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'CRUDEvent-${Environment}'
+      Runtime: python3.12
+      Handler: crud_event.handler
+      Role: !GetAtt EventLambdaExecutionRole.Arn
+      MemorySize: 128
+      Code:
+        S3Bucket: 
+          Fn::ImportValue: !Sub 'EventApp-${Environment}-LambdaCodeBucketEvents'
+        S3Key: 'crud_event.zip'
+      Environment:
+        Variables:
+          TABLE_NAME:
+            Fn::ImportValue: !Sub 'EventApp-${Environment}-EventsTableEvents'
+          STATUS_HANDLER_LAMBDA_ARN: !GetAtt StatusHandlerFunction.Arn
+          REMINDER_LAMBDA_ARN: !GetAtt ReminderEventFunction.Arn
+          ENVIRONMENT: !Ref Environment
+
+  AssistantRegisterFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'AssistantRegister-${Environment}'
+      Runtime: python3.12
+      Handler: assistant_register.handler
+      Role: !GetAtt EventLambdaExecutionRole.Arn
+      MemorySize: 128
+      Code:
+        S3Bucket: 
+          Fn::ImportValue: !Sub 'EventApp-${Environment}-LambdaCodeBucketEvents'
+        S3Key: 'assistant_register.zip'
+      Environment:
+        Variables:
+          TABLE_NAME:
+            Fn::ImportValue: !Sub 'EventApp-${Environment}-EventsTableEvents'
+          ENVIRONMENT: !Ref Environment
+
+  LookUpEventFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'LookUpEvent-${Environment}'
+      Runtime: python3.12
+      Handler: lookup_events.handler
+      Role: !GetAtt EventLambdaExecutionRole.Arn
+      MemorySize: 128
+      Code:
+        S3Bucket: 
+          Fn::ImportValue: !Sub 'EventApp-${Environment}-LambdaCodeBucketEvents'
+        S3Key: 'lookup_events.zip'
+      Environment:
+        Variables:
+          TABLE_NAME:
+            Fn::ImportValue: !Sub 'EventApp-${Environment}-EventsTableEvents'
+          ENVIRONMENT: !Ref Environment
+
+  StatusHandlerFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'StatusHandler-${Environment}'
+      Runtime: python3.12
+      Handler: status_handler.handler
+      Role: !GetAtt EventLambdaExecutionRole.Arn
+      MemorySize: 128
+      Code:
+        S3Bucket: 
+          Fn::ImportValue: !Sub 'EventApp-${Environment}-LambdaCodeBucketEvents'
+        S3Key: 'status_handler.zip'
+      Environment:
+        Variables:
+          TABLE_NAME:
+            Fn::ImportValue: !Sub 'EventApp-${Environment}-EventsTableEvents'
+
+  ReminderEventFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'ReminderEvent-${Environment}'
+      Runtime: python3.12
+      Handler: reminder_event.handler
+      Role: !GetAtt EventLambdaExecutionRole.Arn
+      MemorySize: 128
+      Code:
+        S3Bucket: 
+          Fn::ImportValue: !Sub 'EventApp-${Environment}-LambdaCodeBucketEvents'
+        S3Key: 'reminder_event.zip'
+      Environment:
+        Variables:
+          ENVIRONMENT: !Ref Environment
+
+  SendNotificationFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'SendNotification-${Environment}'
+      Runtime: python3.12
+      Handler: send_notification.handler
+      Role: !GetAtt EventLambdaExecutionRole.Arn
+      MemorySize: 128
+      Code:
+        S3Bucket: 
+          Fn::ImportValue: !Sub 'EventApp-${Environment}-LambdaCodeBucketEvents'
+        S3Key: 'send_notification.zip'
+      Environment:
+        Variables:
+          SES_FROM_EMAIL: !Ref SesFromEmail
+          ENVIRONMENT: !Ref Environment
+          TABLE_NAME:
+            Fn::ImportValue: !Sub 'EventApp-${Environment}-EventsTableEvents'
+
+  RequestReportFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'RequestReport-${Environment}'
+      Runtime: !Ref LambdaRuntime
+      Handler: request_report.handler
+      Role: !GetAtt EventLambdaExecutionRole.Arn
+      MemorySize: !Ref LambdaMemory
+      Timeout: !Ref LambdaTimeout
+      Code:
+        S3Bucket:
+          Fn::ImportValue: !Sub 'EventApp-${Environment}-LambdaCodeBucketEvents'
+        S3Key: 'request_report.zip'
+      Environment:
+        Variables:
+          TABLE_NAME:
+            Fn::ImportValue: !Sub 'EventApp-${Environment}-EventsTableEvents'
+          ENVIRONMENT: !Ref Environment
+
+  GenerateReportFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'GenerateReport-${Environment}'
+      Runtime: !Ref LambdaRuntime
+      Handler: generate_report.handler
+      Role: !GetAtt EventLambdaExecutionRole.Arn
+      MemorySize: 512
+      Timeout: 120
+      Code:
+        S3Bucket:
+          Fn::ImportValue: !Sub 'EventApp-${Environment}-LambdaCodeBucketEvents'
+        S3Key: 'generate_report.zip'
+      Environment:
+        Variables:
+          TABLE_NAME:
+            Fn::ImportValue: !Sub 'EventApp-${Environment}-EventsTableEvents'
+          REPORTS_BUCKET:
+            Fn::ImportValue: !Sub 'EventApp-${Environment}-ReportsBucketEvents'
+          SES_FROM_EMAIL: !Ref SesFromEmail
+          ENVIRONMENT: !Ref Environment
+
+  NotificationEventSourceMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      BatchSize: 10
+      EventSourceArn:
+        Fn::ImportValue: !Sub 'EventApp-${Environment}-NotificationsQueueArn'
+      FunctionName: !GetAtt SendNotificationFunction.Arn
+
+  ReportEventSourceMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      BatchSize: 1
+      EventSourceArn:
+        Fn::ImportValue: !Sub 'EventApp-${Environment}-ReportsQueueArn'
+      FunctionName: !GetAtt GenerateReportFunction.Arn
+
+  StatusHandlerInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt StatusHandlerFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !Sub 'arn:aws:events:${AWS::Region}:${AWS::AccountId}:rule/StatusChange-*'
+
+  ReminderEventInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt ReminderEventFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !Sub 'arn:aws:events:${AWS::Region}:${AWS::AccountId}:rule/Reminder*'
+
+  # =========================================================
+  # 3. API GATEWAY (Endpoints de Eventos)
+  # =========================================================
+  EventApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: !Sub 'EventAPI-${Environment}'
+      
+  EventsResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref EventApi
+      ParentId: !GetAtt EventApi.RootResourceId
+      PathPart: events
+  
+  RegistrationsResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref EventApi
+      ParentId: !GetAtt EventApi.RootResourceId
+      PathPart: registrations
+
+  GetEventsMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref EventApi
+      ResourceId: !Ref EventsResource
+      HttpMethod: GET
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LookUpEventFunction.Arn}/invocations'
+
+  CreateEventMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref EventApi
+      ResourceId: !Ref EventsResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${CRUDEventFunction.Arn}/invocations'
+
+  RegisterAttendeeMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref EventApi
+      ResourceId: !Ref RegistrationsResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${AssistantRegisterFunction.Arn}/invocations'
+
+  RegistrationsOptionsMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref EventApi
+      ResourceId: !Ref RegistrationsResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        IntegrationResponses:
+          - StatusCode: '200'
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,Authorization,X-Amz-Date,X-Api-Key,X-Amz-Security-Token'"
+              method.response.header.Access-Control-Allow-Methods: "'OPTIONS,POST'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+      MethodResponses:
+        - StatusCode: '200'
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+
+  EventsOptionsMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref EventApi
+      ResourceId: !Ref EventsResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        IntegrationResponses:
+          - StatusCode: '200'
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,Authorization,X-Amz-Date,X-Api-Key,X-Amz-Security-Token'"
+              method.response.header.Access-Control-Allow-Methods: "'OPTIONS,GET,POST,PUT'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+      MethodResponses:
+        - StatusCode: '200'
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+
+  EventItemResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref EventApi
+      ParentId: !Ref EventsResource
+      PathPart: '{id}'
+
+  GetEventDetailsMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref EventApi
+      ResourceId: !Ref EventItemResource
+      HttpMethod: GET
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LookUpEventFunction.Arn}/invocations'
+
+  UpdateEventMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref EventApi
+      ResourceId: !Ref EventItemResource
+      HttpMethod: PUT
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${CRUDEventFunction.Arn}/invocations'
+
+  DeleteEventMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref EventApi
+      ResourceId: !Ref EventItemResource
+      HttpMethod: DELETE
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${CRUDEventFunction.Arn}/invocations'
+
+  EventItemOptionsMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref EventApi
+      ResourceId: !Ref EventItemResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        IntegrationResponses:
+          - StatusCode: '200'
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,Authorization,X-Amz-Date,X-Api-Key,X-Amz-Security-Token'"
+              method.response.header.Access-Control-Allow-Methods: "'OPTIONS,GET,PUT,DELETE'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+      MethodResponses:
+        - StatusCode: '200'
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+
+  EventNotificationsResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref EventApi
+      ParentId: !Ref EventItemResource
+      PathPart: notifications
+
+  SendMassNotificationMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref EventApi
+      ResourceId: !Ref EventNotificationsResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${CRUDEventFunction.Arn}/invocations'
+
+  EventNotificationsOptionsMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref EventApi
+      ResourceId: !Ref EventNotificationsResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        IntegrationResponses:
+          - StatusCode: '200'
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,Authorization,X-Amz-Date,X-Api-Key,X-Amz-Security-Token'"
+              method.response.header.Access-Control-Allow-Methods: "'OPTIONS,POST'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+      MethodResponses:
+        - StatusCode: '200'
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+
+  EventReportsResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref EventApi
+      ParentId: !Ref EventItemResource
+      PathPart: reports
+
+  RequestReportMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref EventApi
+      ResourceId: !Ref EventReportsResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${RequestReportFunction.Arn}/invocations'
+
+  EventReportsOptionsMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref EventApi
+      ResourceId: !Ref EventReportsResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        IntegrationResponses:
+          - StatusCode: '200'
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,Authorization,X-Amz-Date,X-Api-Key,X-Amz-Security-Token'"
+              method.response.header.Access-Control-Allow-Methods: "'OPTIONS,POST'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+      MethodResponses:
+        - StatusCode: '200'
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+
+  RequestReportInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt RequestReportFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${EventApi}/*/*/*'
+
+  LookUpEventInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt LookUpEventFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${EventApi}/*/*/*'
+
+
+  ApiGatewayInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt CRUDEventFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${EventApi}/*/*/*'
+
+  AssistantRegisterInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt AssistantRegisterFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${EventApi}/*/*/*'
+
+  # Recursos de Despliegue para activar la API
+  ApiDeploymentV1:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn:
+      - GetEventsMethod
+      - GetEventDetailsMethod
+      - CreateEventMethod
+      - UpdateEventMethod
+      - DeleteEventMethod
+      - EventsOptionsMethod
+      - EventItemOptionsMethod
+      - RegisterAttendeeMethod
+      - RegistrationsOptionsMethod
+      - SendMassNotificationMethod
+      - EventNotificationsOptionsMethod
+      - RequestReportMethod
+      - EventReportsOptionsMethod
+    Properties:
+      RestApiId: !Ref EventApi
+
+  ApiStage:
+    Type: AWS::ApiGateway::Stage
+    Properties:
+      RestApiId: !Ref EventApi
+      DeploymentId: !Ref ApiDeploymentV1
+      StageName: !Ref Environment
+
+  # =========================================================
+  # 4. FRONTEND (S3 y CloudFront sin Dominio Personalizado)
+  # =========================================================
+  EventFrontendBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "eventos-frontend-${AWS::AccountId}-${Environment}"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  EventCloudFrontOAC:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub 'EventFrontendOAC-${Environment}'
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  EventFrontendDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        DefaultRootObject: index.html
+        # No se configuran Aliases ni certificados ACM, usamos el default de CloudFront
+        Origins:
+          - DomainName: !GetAtt EventFrontendBucket.RegionalDomainName
+            Id: S3Origin
+            S3OriginConfig:
+              OriginAccessIdentity: ""
+            OriginAccessControlId: !GetAtt EventCloudFrontOAC.Id
+        DefaultCacheBehavior:
+          TargetOriginId: S3Origin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD, OPTIONS]
+          CachedMethods: [GET, HEAD]
+          ForwardedValues:
+            QueryString: false
+            Cookies:
+              Forward: none
+        ViewerCertificate:
+          CloudFrontDefaultCertificate: true
+
+  EventFrontendBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref EventFrontendBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: cloudfront.amazonaws.com }
+            Action: s3:GetObject
+            Resource: !Sub "${EventFrontendBucket.Arn}/*"
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${EventFrontendDistribution}"
+
+Outputs:
+  FrontendUrl:
+    Description: URL publica directa de CloudFront
+    Value: !Sub "https://${EventFrontendDistribution.DomainName}"
+  ApiGatewayEndpoint:
+    Description: URL base del API Gateway
+    Value: !Sub 'https://${EventApi}.execute-api.${AWS::Region}.amazonaws.com/${Environment}/'
+  FrontendBucketName:
+    Description: Nombre del bucket S3 que aloja el frontend (usado por el pipeline de CI/CD)
+    Value: !Ref EventFrontendBucket
+    Export:
+      Name: !Sub "EventApp-${Environment}-FrontendBucketName"
+  CloudFrontDistributionId:
+    Description: ID de la distribucion CloudFront (usado para invalidar cache en el pipeline)
+    Value: !Ref EventFrontendDistribution
+    Export:
+      Name: !Sub "EventApp-${Environment}-CloudFrontDistributionId"

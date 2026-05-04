@@ -1,0 +1,73 @@
+name: IaC — Data Stack
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'infrastructure/data-stack.yml'
+      - '.github/workflows/deploy-data-stack.yml'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Ambiente de despliegue'
+        required: true
+        default: 'lab'
+        type: choice
+        options: [lab, dev, prod]
+
+env:
+  AWS_REGION: us-east-2
+  ENVIRONMENT: ${{ github.event.inputs.environment || 'lab' }}
+
+jobs:
+  deploy:
+    name: Desplegar Data Stack (DynamoDB · SQS · S3)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configurar credenciales AWS
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Desplegar infrastructure/data-stack.yml
+        run: |
+          aws cloudformation deploy \
+            --template-file infrastructure/data-stack.yml \
+            --stack-name EventApp-${{ env.ENVIRONMENT }}-DataStack \
+            --parameter-overrides Environment=${{ env.ENVIRONMENT }} \
+            --capabilities CAPABILITY_IAM \
+            --no-fail-on-empty-changeset
+
+      - name: Mostrar outputs del stack
+        run: |
+          aws cloudformation describe-stacks \
+            --stack-name EventApp-${{ env.ENVIRONMENT }}-DataStack \
+            --query 'Stacks[0].Outputs' \
+            --output table
+
+      - name: Resumen en GitHub
+        run: |
+          STACK="EventApp-${{ env.ENVIRONMENT }}-DataStack"
+
+          LAMBDA_BUCKET=$(aws cloudformation describe-stacks --stack-name $STACK \
+            --query 'Stacks[0].Outputs[?OutputKey==`LambdaCodeBucketEvents`].OutputValue' \
+            --output text)
+
+          REPORTS_BUCKET=$(aws cloudformation describe-stacks --stack-name $STACK \
+            --query 'Stacks[0].Outputs[?OutputKey==`ReportsBucketEvents`].OutputValue' \
+            --output text)
+
+          echo "## Data Stack desplegado"  >> $GITHUB_STEP_SUMMARY
+          echo ""                          >> $GITHUB_STEP_SUMMARY
+          echo "| Recurso | Nombre |"      >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|"                 >> $GITHUB_STEP_SUMMARY
+          echo "| Bucket Lambdas  | \`${LAMBDA_BUCKET}\`  |"  >> $GITHUB_STEP_SUMMARY
+          echo "| Bucket Reportes | \`${REPORTS_BUCKET}\` |"  >> $GITHUB_STEP_SUMMARY
+          echo ""                          >> $GITHUB_STEP_SUMMARY
+          echo "> **Siguiente paso (primer despliegue):** ejecutar \`Lambdas — Empaquetar y subir\` y luego \`IaC — App Stack\`." >> $GITHUB_STEP_SUMMARY

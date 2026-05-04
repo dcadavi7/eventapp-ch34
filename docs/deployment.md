@@ -1,0 +1,1 @@
+1. considerar activar el correo en SES y crear la identidad (poner lo pasos en el archivo de documentación 

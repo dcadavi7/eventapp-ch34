@@ -1,0 +1,133 @@
+name: Deploy Frontend
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'frontend/**'
+      - '.github/workflows/deploy-frontend.yml'
+  workflow_run:
+    workflows: ['Deploy Backend']
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Ambiente de despliegue'
+        required: true
+        default: 'lab'
+        type: choice
+        options: [lab, dev, prod]
+
+env:
+  AWS_REGION: us-east-2
+  ENVIRONMENT: ${{ github.event.inputs.environment || 'lab' }}
+  NODE_VERSION: '20'
+
+jobs:
+  build-and-deploy:
+    name: Build Next.js → S3 + CloudFront
+    runs-on: ubuntu-latest
+    if: >
+      github.event_name != 'workflow_run' ||
+      github.event.workflow_run.conclusion == 'success'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configurar credenciales AWS
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Leer outputs del App Stack
+        id: infra
+        run: |
+          STACK="EventApp-${{ env.ENVIRONMENT }}-AppStack"
+
+          API_URL=$(aws cloudformation describe-stacks --stack-name $STACK \
+            --query 'Stacks[0].Outputs[?OutputKey==`ApiGatewayEndpoint`].OutputValue' \
+            --output text)
+
+          BUCKET=$(aws cloudformation describe-stacks --stack-name $STACK \
+            --query 'Stacks[0].Outputs[?OutputKey==`FrontendBucketName`].OutputValue' \
+            --output text)
+
+          CF_ID=$(aws cloudformation describe-stacks --stack-name $STACK \
+            --query 'Stacks[0].Outputs[?OutputKey==`CloudFrontDistributionId`].OutputValue' \
+            --output text)
+
+          CF_URL=$(aws cloudformation describe-stacks --stack-name $STACK \
+            --query 'Stacks[0].Outputs[?OutputKey==`FrontendUrl`].OutputValue' \
+            --output text)
+
+          echo "api-url=${API_URL}"     >> $GITHUB_OUTPUT
+          echo "bucket=${BUCKET}"       >> $GITHUB_OUTPUT
+          echo "cloudfront-id=${CF_ID}" >> $GITHUB_OUTPUT
+          echo "frontend-url=${CF_URL}" >> $GITHUB_OUTPUT
+
+          echo "Construyendo con API: ${API_URL}"
+
+      - name: Configurar Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Instalar dependencias
+        working-directory: frontend
+        run: npm ci
+
+      - name: Build — exportación estática de Next.js
+        working-directory: frontend
+        env:
+          NEXT_PUBLIC_API_GATEWAY_URL: ${{ steps.infra.outputs.api-url }}
+        run: npm run build
+
+      - name: Sincronizar con S3
+        run: |
+          BUCKET="${{ steps.infra.outputs.bucket }}"
+          echo "Destino: s3://${BUCKET}"
+
+          # Assets con hash (_next/static): caché de 1 año (inmutable)
+          aws s3 sync frontend/out/ s3://${BUCKET}/ \
+            --delete \
+            --exclude "*.html" \
+            --exclude "*.json" \
+            --cache-control "public, max-age=31536000, immutable"
+
+          # HTML y JSON: sin caché agresivo para que los cambios sean inmediatos
+          aws s3 sync frontend/out/ s3://${BUCKET}/ \
+            --delete \
+            --include "*.html" \
+            --include "*.json" \
+            --cache-control "public, max-age=0, must-revalidate"
+
+          echo "Sincronización completada"
+
+      - name: Invalidar caché de CloudFront
+        run: |
+          CF_ID="${{ steps.infra.outputs.cloudfront-id }}"
+          echo "Invalidando distribución: ${CF_ID}"
+
+          INVALIDATION_ID=$(aws cloudfront create-invalidation \
+            --distribution-id "${CF_ID}" \
+            --paths "/*" \
+            --query 'Invalidation.Id' \
+            --output text)
+
+          echo "Invalidación creada: ${INVALIDATION_ID}"
+
+      - name: Resumen en GitHub
+        run: |
+          echo "## Frontend desplegado"                                               >> $GITHUB_STEP_SUMMARY
+          echo ""                                                                     >> $GITHUB_STEP_SUMMARY
+          echo "**URL:** ${{ steps.infra.outputs.frontend-url }}"                    >> $GITHUB_STEP_SUMMARY
+          echo ""                                                                     >> $GITHUB_STEP_SUMMARY
+          echo "| Variable de build | Valor |"                                        >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|"                                                             >> $GITHUB_STEP_SUMMARY
+          echo "| NEXT_PUBLIC_API_GATEWAY_URL | ${{ steps.infra.outputs.api-url }} |" >> $GITHUB_STEP_SUMMARY

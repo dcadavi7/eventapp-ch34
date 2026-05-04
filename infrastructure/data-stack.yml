@@ -1,0 +1,180 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  EventApp — Stack 01: Capa de Datos
+  =========================================
+  Provisiona los recursos de persistencia y mensajeria para Eventos:
+    - DynamoDB EventsTable (Almacena eventos y registros de asistentes)
+    - SQS Standard + DLQ (Para envio de notificaciones via SES)
+    - SQS FIFO (Para la generacion de reportes)
+
+Parameters:
+  Environment:
+    Type: String
+    Default: lab
+    AllowedValues: [lab, dev, prod]
+
+  SqsVisibilityTimeout:
+    Type: Number
+    Default: 60
+    Description: Timeout de visibilidad para la cola de notificaciones.
+
+Resources:
+  # -----------------------------------------------
+  # DYNAMODB — Tabla principal de Eventos
+  # -----------------------------------------------
+  EventsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    Properties:
+      TableName: !Sub "EventsTable-${Environment}"
+      BillingMode: PAY_PER_REQUEST # On-Demand para picos de inscripcion
+      AttributeDefinitions:
+        # Claves reales de la tabla
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+        # Claves del GSI invertido
+        - AttributeName: GSI1PK
+          AttributeType: S
+        - AttributeName: GSI1SK
+          AttributeType: S
+        # Atributos de negocio para GSIs adicionales
+        - AttributeName: status
+          AttributeType: S
+        - AttributeName: startDate
+          AttributeType: S
+        - AttributeName: organizerId
+          AttributeType: S
+        - AttributeName: createdAt
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: GSI1
+          KeySchema:
+            - AttributeName: GSI1PK
+              KeyType: HASH
+            - AttributeName: GSI1SK
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        - IndexName: EventsByStatusGSI
+          KeySchema:
+            - AttributeName: status
+              KeyType: HASH
+            - AttributeName: startDate
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        - IndexName: EventsByOrganizerGSI
+          KeySchema:
+            - AttributeName: organizerId
+              KeyType: HASH
+            - AttributeName: createdAt
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Layer
+          Value: DataStack
+
+  # -----------------------------------------------
+  # SQS — Dead Letter Queue (DLQ)
+  # -----------------------------------------------
+  EventNotificationsDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "EventNotificationsDLQ-${Environment}"
+      MessageRetentionPeriod: 1209600 # 14 dias para diagnosticar correos fallidos
+
+  # -----------------------------------------------
+  # SQS — Cola Standard (Notificaciones a Asistentes)
+  # -----------------------------------------------
+  EventNotificationsQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "EventNotificationsQueue-${Environment}"
+      VisibilityTimeout: !Ref SqsVisibilityTimeout
+      ReceiveMessageWaitTimeSeconds: 20
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt EventNotificationsDLQ.Arn
+        maxReceiveCount: 3
+
+  # -----------------------------------------------
+  # SQS — Cola FIFO (Generacion de Reportes)
+  # -----------------------------------------------
+  EventReportsQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "EventReportsQueue-${Environment}.fifo"
+      FifoQueue: true
+      ContentBasedDeduplication: true
+      VisibilityTimeout: 300 # Tiempo mayor porque generar un reporte toma mas tiempo
+
+  # ========================================================
+  # S3 BUCKET 2 — CÓDIGO DE LAMBDAS
+  # ========================================================
+  # - Almacena ZIPs de despliegue
+  # - NO contiene datos de negocio
+  # - Versionado habilitado para rollback
+  # ========================================================
+  LambdaCodeBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "eventmanager-lambdas-${AWS::AccountId}-${Environment}"
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  # ========================================================
+  # S3 BUCKET 3 — REPORTES
+  # ========================================================
+  # - Guarda reportes generados asíncronamente
+  # - Acceso controlado (no público)
+  # - Datos de salida del sistema
+  # ========================================================
+  ReportsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "eventmanager-reports-${AWS::AccountId}-${Environment}"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+Outputs:
+  LambdaCodeBucketEvents:
+    Value: !Ref LambdaCodeBucket
+    Export:
+      Name: !Sub "EventApp-${Environment}-LambdaCodeBucketEvents"
+  ReportsBucketEvents:
+    Value: !Ref ReportsBucket
+    Export:
+      Name: !Sub "EventApp-${Environment}-ReportsBucketEvents"
+  EventsTableEvents:
+    Value: !Ref EventsTable
+    Export:
+      Name: !Sub "EventApp-${Environment}-EventsTableEvents"
+  EventsTableArn:
+    Value: !GetAtt EventsTable.Arn
+    Export:
+      Name: !Sub "EventApp-${Environment}-EventsTableArn"
+  NotificationsQueueArn:
+    Value: !GetAtt EventNotificationsQueue.Arn
+    Export:
+      Name: !Sub "EventApp-${Environment}-NotificationsQueueArn"
+  ReportsQueueArn:
+    Value: !GetAtt EventReportsQueue.Arn
+    Export:
+      Name: !Sub "EventApp-${Environment}-ReportsQueueArn"
