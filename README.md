@@ -34,7 +34,7 @@ El sistema notifica por correo electrónico en cada acción relevante: confirmac
 
 ## 2. Arquitectura
 
-![Diagrama de arquitectura](docs/architecture/Reto2Nube.png)
+![Diagrama de arquitectura](docs/architecture/diagrama-arquitectura.png)
 
 **Autenticación:** Amazon Cognito con dos grupos (`Organizers`, `Attendees`).
 
