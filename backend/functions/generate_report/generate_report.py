@@ -7,14 +7,17 @@ import boto3
 from datetime import datetime
 from decimal import Decimal
 from botocore.exceptions import ClientError
+from botocore.config import Config
 from boto3.dynamodb.conditions import Key
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
-dynamodb = boto3.resource('dynamodb')
-s3 = boto3.client('s3')
-ses = boto3.client('ses')
+AWS_REGION = os.environ.get('AWS_DEFAULT_REGION', 'us-east-2')
+
+dynamodb = boto3.resource('dynamodb', region_name=AWS_REGION)
+s3 = boto3.client('s3', region_name=AWS_REGION, config=Config(signature_version='s3v4'))
+ses = boto3.client('ses', region_name=AWS_REGION)
 
 TABLE_NAME = os.environ.get('TABLE_NAME')
 REPORTS_BUCKET = os.environ.get('REPORTS_BUCKET')

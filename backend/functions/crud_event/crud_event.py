@@ -287,7 +287,12 @@ def update_event(table, event_id, body):
 
     try:
         table.update_item(**kwargs)
-        
+
+        # Si cambió la fecha de inicio, reprogramar las reglas de EventBridge
+        if 'startDate' in body:
+            manage_eventbridge_rule(event_id, 'DELETE')
+            manage_eventbridge_rule(event_id, 'CREATE', body['startDate'])
+
         # Determinar el tipo de acción a notificar
         if body.get('status') == 'FINALIZADO':
             action = 'EVENT_COMPLETED'
@@ -295,7 +300,7 @@ def update_event(table, event_id, body):
             action = 'EVENT_CANCELLED'
         else:
             action = 'EVENT_UPDATED'
-        
+
         # Notificar cambio vía SQS
         send_sqs_notification({
             'action': action,
