@@ -13,17 +13,36 @@ from boto3.dynamodb.conditions import Key
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
-AWS_REGION = os.environ.get('AWS_DEFAULT_REGION', 'us-east-2')
+AWS_REGION = os.environ.get('AWS_REGION', 'us-east-2')
 
 dynamodb = boto3.resource('dynamodb', region_name=AWS_REGION)
-s3 = boto3.client('s3', region_name=AWS_REGION, config=Config(signature_version='s3v4'))
 ses = boto3.client('ses', region_name=AWS_REGION)
 
 TABLE_NAME = os.environ.get('TABLE_NAME')
 REPORTS_BUCKET = os.environ.get('REPORTS_BUCKET')
 SES_FROM_EMAIL = os.environ.get('SES_FROM_EMAIL')
 
-PRESIGNED_URL_TTL = 86400  # 24 horas
+# Con credenciales STS (Lambda execution role) el presigned URL no puede superar
+# el tiempo de vida del token (~1 hora). 3600 s es el valor seguro.
+PRESIGNED_URL_TTL = 3600
+
+
+def get_s3_client():
+    """
+    Crea un cliente S3 con las credenciales STS actuales de la invocación.
+    Se instancia dentro del handler para capturar siempre el token vigente.
+    """
+    return boto3.client(
+        's3',
+        region_name=AWS_REGION,
+        aws_access_key_id=os.environ.get('AWS_ACCESS_KEY_ID'),
+        aws_secret_access_key=os.environ.get('AWS_SECRET_ACCESS_KEY'),
+        aws_session_token=os.environ.get('AWS_SESSION_TOKEN'),
+        config=Config(
+            signature_version='s3v4',
+            s3={'addressing_style': 'virtual'}
+        )
+    )
 
 
 def handler(event, context):
@@ -66,6 +85,7 @@ def handler(event, context):
             # 3. Subir CSV a S3
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
             s3_key = f"reports/{event_id}/{timestamp}_asistentes.csv"
+            s3 = get_s3_client()
             s3.put_object(
                 Bucket=REPORTS_BUCKET,
                 Key=s3_key,
@@ -75,12 +95,13 @@ def handler(event, context):
             )
             logger.info(f"Reporte subido: s3://{REPORTS_BUCKET}/{s3_key}")
 
-            # 4. Generar presigned URL (válida 24 h)
+            # 4. Generar presigned URL (válida 1 hora — límite seguro con STS)
             presigned_url = s3.generate_presigned_url(
                 'get_object',
                 Params={'Bucket': REPORTS_BUCKET, 'Key': s3_key},
                 ExpiresIn=PRESIGNED_URL_TTL
             )
+            logger.info(f"Presigned URL generada con TTL={PRESIGNED_URL_TTL}s")
 
             # 5. Notificar al solicitante por correo
             if requester_email and SES_FROM_EMAIL:
@@ -123,13 +144,13 @@ def send_report_email(to_email, event_name, attendee_count, presigned_url):
             f"<li>Total de asistentes registrados: <b>{attendee_count}</b></li>"
             f"</ul>"
             f"<p><a href='{presigned_url}' style='padding:10px 20px;background:#4f46e5;color:white;text-decoration:none;border-radius:6px;'>Descargar reporte CSV</a></p>"
-            f"<p><small>El enlace es válido por 24 horas.</small></p>"
+            f"<p><small>El enlace es válido por 1 hora.</small></p>"
         )
         text_body = (
             f"Reporte listo para el evento: {event_name}\n"
             f"Total asistentes: {attendee_count}\n"
             f"Descarga: {presigned_url}\n"
-            f"(Válido por 24 horas)"
+            f"(Válido por 1 hora)"
         )
         ses.send_email(
             Source=SES_FROM_EMAIL,
