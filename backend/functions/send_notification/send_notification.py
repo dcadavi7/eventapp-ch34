@@ -82,11 +82,31 @@ def email_wrapper(content_html):
     """
 
 
+MESES = ['enero','febrero','marzo','abril','mayo','junio',
+         'julio','agosto','septiembre','octubre','noviembre','diciembre']
+
+def format_date_cot(iso_string):
+    """Convierte un ISO UTC a fecha legible en hora de Colombia (UTC-5)."""
+    if not iso_string:
+        return ''
+    try:
+        from datetime import timezone, timedelta
+        from datetime import datetime as dt
+        COT = timezone(timedelta(hours=-5))
+        utc_dt = dt.fromisoformat(iso_string.replace('Z', '+00:00'))
+        local = utc_dt.astimezone(COT)
+        hora = local.strftime('%I:%M %p').lstrip('0')  # "8:07 PM"
+        return f"{local.day} de {MESES[local.month - 1]} de {local.year}, {hora} (hora de Colombia)"
+    except Exception:
+        return iso_string
+
+
 def event_info_block(evt):
     """Bloque HTML con los datos del evento (nombre, fecha, lugar)."""
     rows = f"<tr><td style='color:#64748b;padding:6px 0;font-size:14px;'>Evento</td><td style='font-weight:600;font-size:14px;padding:6px 0 6px 16px;'>{evt['name']}</td></tr>"
     if evt['date']:
-        rows += f"<tr><td style='color:#64748b;padding:6px 0;font-size:14px;'>Fecha</td><td style='font-weight:600;font-size:14px;padding:6px 0 6px 16px;'>{evt['date']}</td></tr>"
+        fecha_legible = format_date_cot(evt['date'])
+        rows += f"<tr><td style='color:#64748b;padding:6px 0;font-size:14px;'>Fecha</td><td style='font-weight:600;font-size:14px;padding:6px 0 6px 16px;'>{fecha_legible}</td></tr>"
     if evt['location']:
         rows += f"<tr><td style='color:#64748b;padding:6px 0;font-size:14px;'>Lugar</td><td style='font-weight:600;font-size:14px;padding:6px 0 6px 16px;'>{evt['location']}</td></tr>"
     return f"""

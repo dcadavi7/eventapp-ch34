@@ -177,7 +177,10 @@ export default function CrearEventoPage() {
             </div>
 
             <div>
-              <label className="block text-sm font-medium text-slate-700 mb-1">Hora de Inicio</label>
+              <label className="block text-sm font-medium text-slate-700 mb-1">
+                Hora de Inicio
+                <span className="ml-1 text-xs font-normal text-slate-400">(formato 24 h — 20:00 = 8 PM)</span>
+              </label>
               <input
                 type="time"
                 name="time"
